@@ -1,0 +1,454 @@
+import 'package:flutter/material.dart';
+import 'package:language_app/features/home/widgets/chat_message.dart';
+import 'package:language_app/features/home/widgets/difficulty_rating_popup.dart';
+import 'package:language_app/features/home/widgets/recording_overlay.dart';
+import 'package:language_app/features/home/widgets/suggested_vocab_chip.dart';
+import 'package:language_app/features/home/home_view.dart';
+import 'package:language_app/features/home/widgets/conversation_input_area.dart';
+import 'package:language_app/app/theme/app_style.dart';
+import 'package:language_app/core/utils/mock_data.dart';
+import 'package:language_app/core/providers/theme_provider.dart';
+import 'package:provider/provider.dart';
+
+// Avatar logic imports
+import 'package:language_app/features/avatar/avatar_controller.dart';
+import 'package:language_app/features/avatar/avatar_view.dart';
+import 'package:language_app/app/constants/app_constants.dart';
+// import 'package:language_app/features/home/learning/result/lesson_end_result.dart';
+
+class CommonConversationChat extends StatefulWidget {
+  final String selectedAvatarName;
+
+  const CommonConversationChat({super.key, required this.selectedAvatarName});
+
+  @override
+  State<CommonConversationChat> createState() => _CommonConversationChatState();
+}
+
+class _CommonConversationChatState extends State<CommonConversationChat> {
+  final TextEditingController _textController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  final FocusNode _focusNode = FocusNode();
+
+  late AvatarController _avatarController;
+
+  List<Map<String, dynamic>> messages = [];
+  List<Map<String, dynamic>> suggestedVocab = [];
+  bool isRecording = false;
+  bool isKeyboardVisible = false;
+  bool hasTextInput = false;
+  bool isMuted = false;
+  bool isAvatarMaximized = true;
+
+  void _cancelRecording() {
+    setState(() {
+      isRecording = false;
+    });
+    debugPrint("Recording Cancelled");
+    // We do NOT call _sendMessage here, effectively aborting the voice note.
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _avatarController = AvatarController();
+    _loadConversation();
+
+    _focusNode.addListener(() {
+      setState(() {
+        isKeyboardVisible = _focusNode.hasFocus;
+      });
+    });
+
+    _textController.addListener(() {
+      setState(() {
+        hasTextInput = _textController.text.trim().isNotEmpty;
+      });
+    });
+  }
+
+  void _loadConversation() {
+    final messageData = MockData.conversationMessages;
+
+    setState(() {
+      suggestedVocab = List<Map<String, dynamic>>.from(
+        MockData.conversationThread['suggested_vocab'],
+      );
+      messages = List<Map<String, dynamic>>.from(messageData['messages']);
+    });
+  }
+
+  Color _getThemeColor() {
+    return AppColors.getAvatarTheme(widget.selectedAvatarName);
+  }
+
+  void _sendMessage(String text, {bool isVoice = false}) {
+    if (text.trim().isEmpty && !isVoice) return;
+
+    setState(() {
+      messages.add({
+        "id": "m_user_${DateTime.now().millisecondsSinceEpoch}",
+        "role": "user",
+        "text": text,
+        "is_voice": isVoice,
+        "audio": isVoice ? "assets/audio/user_voice.mp3" : null,
+        "created_at": DateTime.now().toIso8601String(),
+      });
+    });
+
+    _textController.clear();
+    _scrollToBottom();
+    _getAvatarResponse();
+  }
+
+  // UPDATED: Now accepts the word and an optional callback
+  void _showDifficultyRating({
+    required String word,
+    String? contextWord,
+    Function(String)? onRatingDone,
+  }) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => DifficultyRatingPopup(
+        word: word, // Pass dynamic word
+        contextWord: contextWord, // Pass context word
+        onRatingSelected: (difficulty) {
+          Navigator.of(context).pop();
+          if (onRatingDone != null) {
+            // Use specific callback (e.g., for sending messages)
+            onRatingDone(difficulty);
+          } else {
+            // Default behavior for vocab chips (e.g., just log it)
+            debugPrint("User rated word '$word' as $difficulty");
+          }
+        },
+      ),
+    );
+  }
+
+  void _getAvatarResponse() {
+    // Simulate "thinking" delay for realism
+    Future.delayed(const Duration(milliseconds: 1000), () {
+      int currentAvatarCount =
+          messages.where((m) => m['role'] == 'avatar').length;
+      final response = MockData.getNextConversationStep(currentAvatarCount);
+      if (response != null) {
+        setState(() {
+          messages.add(response);
+        });
+        _scrollToBottom();
+      } else {
+        // Conversation Script Finished
+        debugPrint("Conversation finished. User can check results.");
+        setState(() {});
+      }
+    });
+  }
+
+  void _toggleAvatarSize() {
+    setState(() => isAvatarMaximized = !isAvatarMaximized);
+  }
+
+  void _toggleMute() {
+    setState(() => isMuted = !isMuted);
+    if (isMuted) {
+      _avatarController.stopAudioViseme();
+    }
+  }
+
+  Future<void> _repeatDemoAudio() async {
+    if (isMuted) return;
+    try {
+      final visemes = await _avatarController.loadVisemesFromAsset(
+        'test/data/viseme.txt',
+      );
+      await _avatarController.playAudioViseme(
+        'test/test_assets/russian_sample.wav',
+        visemes,
+      );
+    } catch (e) {
+      debugPrint("Error playing demo audio: $e");
+    }
+  }
+
+  void _scrollToBottom() {
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  void _startRecording() => setState(() => isRecording = true);
+
+  void _stopRecording() {
+    setState(() => isRecording = false);
+    Future.delayed(const Duration(milliseconds: 300), () {
+      _sendMessage("", isVoice: true);
+    });
+  }
+
+  void _insertSuggestedWord(String word) {
+    final currentText = _textController.text;
+    _textController.text = currentText.isEmpty ? word : '$currentText $word';
+    _textController.selection = TextSelection.fromPosition(
+      TextPosition(offset: _textController.text.length),
+    );
+  }
+
+  final Map<String, int> newScores = {
+    "Speaking": 85,
+    "Listening": 70,
+    "Grammar": 92,
+    "Vocabulary": 75,
+    "Writing": 60,
+  };
+
+  @override
+  void dispose() {
+    _textController.dispose();
+    _scrollController.dispose();
+    _focusNode.dispose();
+    _avatarController.disposeView();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final themeProvider = context.watch<ThemeProvider>();
+    final themeColor = themeProvider.getAvatarTheme(widget.selectedAvatarName);
+    final bool isKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
+
+    return Scaffold(
+      backgroundColor: themeProvider.scaffoldBackgroundColor,
+      extendBodyBehindAppBar: false,
+      appBar: AppBar(
+        backgroundColor: themeProvider.appBarColor,
+        elevation: 0,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back_ios, color: themeProvider.primaryColor),
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
+      body: Stack(
+        children: [
+          Column(
+            children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 400),
+                curve: Curves.fastOutSlowIn,
+                margin: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                height: isKeyboardOpen ? 140 : (isAvatarMaximized ? 500 : 340),
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [themeColor, themeColor.withOpacity(0.7)],
+                  ),
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                child: SafeArea(
+                  bottom: false,
+                  child: Stack(
+                    alignment: Alignment.bottomCenter,
+                    children: [
+                      AvatarView(
+                        avatarName: widget.selectedAvatarName,
+                        controller: _avatarController,
+                        height: isKeyboardOpen
+                            ? 180
+                            : (isAvatarMaximized ? 540 : 380),
+                        backgroundImagePath: AppConstants.backgroundImage,
+                        borderRadius: 24,
+                      ),
+                      // Positioned(
+                      //   top: 10,
+                      //   right: 16,
+                      //   child: GestureDetector(
+                      //     onTap: _toggleAvatarSize,
+                      //     child: Container(
+                      //       padding: const EdgeInsets.all(8),
+                      //       decoration: BoxDecoration(
+                      //         color: Colors.black.withOpacity(0.2),
+                      //         shape: BoxShape.circle,
+                      //       ),
+                      //       child: Icon(
+                      //         isAvatarMaximized
+                      //             ? Icons.keyboard_arrow_up
+                      //             : Icons.keyboard_arrow_down,
+                      //         color: Colors.white,
+                      //         size: 20,
+                      //       ),
+                      //     ),
+                      //   ),
+                      // ),
+                      if (!isKeyboardOpen)
+                        Positioned(
+                          bottom: 20,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Row(
+                              children: [
+                                Text(
+                                  widget.selectedAvatarName,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Row(
+                                  children: [
+                                    _buildCircleAction(
+                                      icon: Icons.repeat,
+                                      onTap: _repeatDemoAudio,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildCircleAction(
+                                      icon: isMuted
+                                          ? Icons.volume_off
+                                          : Icons.volume_up,
+                                      onTap: _toggleMute,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildCircleAction(
+                                      icon: isAvatarMaximized
+                                          ? Icons.fullscreen_exit
+                                          : Icons.fullscreen,
+                                      onTap: _toggleAvatarSize,
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              if (!isKeyboardOpen)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      // 1. New Helper Text
+                      Padding(
+                        padding: const EdgeInsets.only(
+                          left: 16,
+                          bottom: 8,
+                          right: 16,
+                        ),
+                        child: Text(
+                          textAlign: TextAlign.center,
+                          "Try to use these words in your responses",
+                          style: TextStyle(
+                            color: Colors.grey[600],
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+
+                      // 2. Existing Horizontal Scroll List
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.only(left: 16, right: 16),
+                        child: Row(
+                          children: suggestedVocab.map((vocab) {
+                            return Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: SuggestedVocabChip(
+                                text: vocab['text'],
+                                onTap: () =>
+                                    _insertSuggestedWord(vocab['text']),
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              Expanded(
+                child: ListView.builder(
+                  controller: _scrollController,
+                  physics: const BouncingScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 20),
+                  itemCount: messages.length,
+                  itemBuilder: (context, index) {
+                    final message = messages[index];
+                    final bool isVoiceMessage = message['role'] == 'avatar' ||
+                        (message['is_voice'] ?? false);
+
+                    return ChatMessage(
+                      text: message['text'],
+                      isUser: message['role'] == 'user',
+                      audioUrl: message['audio'],
+                      showPlayButton: isVoiceMessage,
+                      translation: message['translation']?['de'],
+
+                      // --- ADD THIS CALLBACK HERE ---
+                      onHighlightTap: (word, contextWord) {
+                        // When a bold word is tapped, show the rating popup
+                        _showDifficultyRating(
+                          word: word,
+                          contextWord: contextWord,
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+              ConversationInputArea(
+                textController: _textController,
+                focusNode: _focusNode,
+                hasTextInput: hasTextInput,
+                themeColor: themeColor,
+                onStartRecording: _startRecording,
+                onSendMessage: (text) => _sendMessage(text, isVoice: false),
+              ),
+            ],
+          ),
+          if (isRecording)
+            RecordingOverlay(
+              onRecordingComplete: _stopRecording,
+              onRecordingCancelled: _cancelRecording, // <--- Add this
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCircleAction({
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(6),
+        decoration: const BoxDecoration(
+          color: Colors.white24,
+          shape: BoxShape.circle,
+        ),
+        child: Icon(icon, color: Colors.white, size: 16),
+      ),
+    );
+  }
+}
